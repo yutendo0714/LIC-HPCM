@@ -14,7 +14,7 @@ import torch.optim as optim
 
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from torch.utils.tensorboard import SummaryWriter
+import wandb
 
 class Dataset(torch.utils.data.Dataset):
 
@@ -121,6 +121,19 @@ def train_one_epoch(
         psnr.update(out_criterion["psnr"])
         y_bpp.update(out_criterion["y_bpp"])
         z_bpp.update(out_criterion["z_bpp"])
+        wandb.log(
+            {
+                "train/loss": out_criterion["loss"].item(),
+                "train/bpp_loss": out_criterion["bpp_loss"].item(),
+                "train/mse_loss": out_criterion["mse_loss"].item(),
+                "train/psnr": out_criterion["psnr"].item(),
+                "train/y_bpp": out_criterion["y_bpp"].item(),
+                "train/z_bpp": out_criterion["z_bpp"].item(),
+                "train/lr": optimizer.param_groups[0]["lr"],
+                "epoch": epoch,
+            },
+            step=global_step,
+        )
 
         if i % 100 == 0 :
             t_end = time.time()-t_start
@@ -142,7 +155,7 @@ def train_one_epoch(
     return global_step
 
 
-def test_epoch(epoch, test_dataloader, model, criterion, writer):
+def test_epoch(epoch, test_dataloader, model, criterion):
     model.eval()
     device = next(model.parameters()).device
 
@@ -174,9 +187,18 @@ def test_epoch(epoch, test_dataloader, model, criterion, writer):
         f"\ty bpp: {y_bpp.avg:.4f} |"
         f"\tz bpp: {z_bpp.avg:.4f} |"
     )
-    writer.add_scalar("test_loss", loss.avg, global_step = epoch)
-    writer.add_scalar("test_mse_loss", mse_loss.avg, global_step = epoch)
-    writer.add_scalar("test_bpp_loss", bpp_loss.avg, global_step = epoch)
+    wandb.log(
+        {
+            "test/loss": loss.avg,
+            "test/mse_loss": mse_loss.avg,
+            "test/bpp_loss": bpp_loss.avg,
+            "test/psnr": psnr.avg,
+            "test/y_bpp": y_bpp.avg,
+            "test/z_bpp": z_bpp.avg,
+            "epoch": epoch,
+        },
+        step=epoch,
+    )
 
     return loss.avg
 
@@ -274,6 +296,12 @@ def main(argv):
     if args.seed is not None:
         torch.manual_seed(args.seed)
         random.seed(args.seed)
+    wandb_project = os.environ.get("WANDB_PROJECT", "LIC_HPCM")
+    wandb_run = wandb.init(
+        project=wandb_project,
+        config=vars(args),
+        name=f"HPCM_{args.model_name}_lambda_{args.lmbda}",
+    )
 
     test_dataset = Dataset(
         args.test_dataset,
@@ -314,6 +342,7 @@ def main(argv):
     net = importlib.import_module(f'.{args.model_name}', f'src.models').HPCM()
     print(net)
     net = net.to(device)
+    wandb.watch(net, log="all", log_freq=100)
 
     lr_scheduler = lambda x : \
     1e-4 if x < 2750 else (
@@ -332,8 +361,6 @@ def main(argv):
 
     optimizer = optim.Adam(net.parameters(), lr=1e-4)
     criterion = RateDistortionLoss(lmbda=args.lmbda)
-
-    writer = SummaryWriter(args.log_dir)
 
     best_loss = float("inf")
     global_step = 0
@@ -355,7 +382,7 @@ def main(argv):
             args.clip_max_norm,
         )
 
-        loss = test_epoch(epoch, test_dataloader, net, criterion, writer)
+        loss = test_epoch(epoch, test_dataloader, net, criterion)
 
         is_best = loss < best_loss
         best_loss = min(loss, best_loss)
